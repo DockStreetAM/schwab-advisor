@@ -286,3 +286,44 @@ class TestCallbackCsrfNonce:
             restarted = TestClient(server_module.app)
             resp = restarted.get(f"/oauth/callback?code=c&state={state}")
         assert resp.status_code == 200
+
+
+class TestRedirectUriConfiguration:
+    """The sandbox app's redirect URI must come from configuration.
+
+    It was previously hard-coded to the maintainer's own broker host,
+    which baked one deployment's infrastructure into a published
+    library. These guard against that regressing.
+    """
+
+    @staticmethod
+    def _fresh_get_auth():
+        """get_auth is @lru_cache'd, so a prior call's SchwabAuth would be
+        handed back regardless of the environment this test sets."""
+        from schwab_advisor.server import get_auth
+
+        get_auth.cache_clear()
+        return get_auth
+
+    def test_sandbox_redirect_uri_read_from_env(self, monkeypatch):
+        get_auth = self._fresh_get_auth()
+
+        monkeypatch.setenv("SCHWAB_SANDBOX_REDIRECT_URI",
+                           "https://example.test/oauth/callback")
+        monkeypatch.setenv("SCHWAB_SANDBOX_CLIENT_ID", "cid")
+        monkeypatch.setenv("SCHWAB_SANDBOX_CLIENT_SECRET", "secret")
+        auth = get_auth("sandbox")
+        assert auth.redirect_uri == "https://example.test/oauth/callback"
+
+    def test_sandbox_redirect_uri_default_is_not_an_external_host(
+        self, monkeypatch
+    ):
+        get_auth = self._fresh_get_auth()
+
+        monkeypatch.delenv("SCHWAB_SANDBOX_REDIRECT_URI", raising=False)
+        monkeypatch.setenv("SCHWAB_SANDBOX_CLIENT_ID", "cid")
+        monkeypatch.setenv("SCHWAB_SANDBOX_CLIENT_SECRET", "secret")
+        auth = get_auth("sandbox")
+        # Matches SchwabAuth.from_env()'s prod default; deployments are
+        # expected to override it with their registered callback URL.
+        assert auth.redirect_uri == "https://127.0.0.1"

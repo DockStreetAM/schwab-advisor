@@ -1,20 +1,23 @@
 """OAuth callback server for Schwab API authentication.
 
-Multi-app broker: holds tokens for **two** Schwab apps in parallel:
+Multi-app broker: holds tokens for **two** Schwab apps in parallel, so a
+production app and a sandbox app can be authorized independently without
+either process holding the other's refresh token.
 
-  - **prod**    (default) — DSAM Integration production app
-                            (AS Alerts + AS Status; account-bundle pending)
-  - **sandbox** — DSAM Integration sandbox app
-                  (used for testing approved-but-not-yet-prod APIs)
+  - **prod**    (default) — your production Schwab app
+  - **sandbox** — your sandbox Schwab app
 
 Each app reads its credentials from a distinct env-var prefix
 (``SCHWAB_*`` for prod, ``SCHWAB_SANDBOX_*`` for sandbox) and persists
-its tokens to a distinct file on the Fly volume. Endpoints accept an
-optional ``?app=prod|sandbox`` query parameter (default ``prod``).
+its tokens to a distinct file. Endpoints accept an optional
+``?app=prod|sandbox`` query parameter (default ``prod``).
 
 The ``/oauth/callback`` endpoint reads OAuth's ``state`` parameter to
-know which app a returning consent belongs to, since both apps share
-the same registered callback URL on schwab-oauth.fly.dev.
+know which app a returning consent belongs to, which is what lets both
+apps share a single registered callback URL. Set that URL — whatever you
+registered with Schwab — via ``SCHWAB_REDIRECT_URI`` and
+``SCHWAB_SANDBOX_REDIRECT_URI``; nothing here is tied to a particular
+host or hosting provider.
 """
 
 import hmac
@@ -55,9 +58,9 @@ _TENANT_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
 # their OWN Schwab login and overwrite our stored tokens with theirs —
 # a token-store poisoning/DoS, though never a disclosure of our data.
 #
-# Nonces persist to the Fly volume, NOT process memory: the machine
-# autostops within minutes of idle, and a user's login easily spans a
-# cold restart between /oauth/start and the callback.
+# Nonces persist to disk (OAUTH_STATE_FILE), NOT process memory: a host
+# that autostops when idle can cold-restart between /oauth/start and the
+# callback, which a user's login easily spans.
 
 _STATE_TTL = timedelta(minutes=10)
 _STATE_LOCK = threading.Lock()
@@ -149,9 +152,11 @@ def get_auth(app_name: AppName = "prod") -> SchwabAuth:
         return SchwabAuth(
             client_id=os.environ.get("SCHWAB_SANDBOX_CLIENT_ID", ""),
             client_secret=os.environ.get("SCHWAB_SANDBOX_CLIENT_SECRET", ""),
+            # Same default as SchwabAuth.from_env() uses for the prod app.
+            # Deployments set SCHWAB_SANDBOX_REDIRECT_URI to whatever
+            # callback URL is registered with Schwab for their app.
             redirect_uri=os.environ.get(
-                "SCHWAB_SANDBOX_REDIRECT_URI",
-                "https://schwab-oauth.fly.dev/oauth/callback",
+                "SCHWAB_SANDBOX_REDIRECT_URI", "https://127.0.0.1"
             ),
             token_file=os.environ.get(
                 "SCHWAB_SANDBOX_TOKEN_FILE", "/data/schwab_sandbox_tokens.json"
