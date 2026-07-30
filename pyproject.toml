@@ -1,0 +1,69 @@
+[project]
+name = "schwab-advisor"
+version = "0.4.0"
+description = "Python client for Schwab Advisor Services API"
+authors = [
+    {name = "Spencer Ogden"}
+]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["schwab", "advisor", "api", "finance", "trading"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "httpx>=0.25.0",
+    "cryptography>=42.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+forms = [
+    "stagehand>=1.0",
+    "playwright>=1.40",
+]
+
+[project.urls]
+Homepage = "https://github.com/DockStreetAM/schwab-advisor"
+Repository = "https://github.com/DockStreetAM/schwab-advisor"
+Issues = "https://github.com/DockStreetAM/schwab-advisor/issues"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [{include = "schwab_advisor", from = "src"}]
+
+[project.scripts]
+schwab-auth = "schwab_advisor.cli:main"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+ruff = "^0.4"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "sandbox: tests that hit the live Schwab sandbox API",
+    "production: tests that hit the live Schwab production API (gated by SCHWAB_ALLOW_PROD_TESTS=1)",
+]
+addopts = "-m 'not sandbox and not production'"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
