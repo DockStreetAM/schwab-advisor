@@ -111,7 +111,7 @@ from .models import (
     WireTransferResponse,
 )
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # Every public name imported above is part of the package API.
 # tests/test_client.py::TestPublicExports guards completeness
