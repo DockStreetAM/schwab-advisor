@@ -1845,6 +1845,34 @@ class TestTypedRawDictMethodsTail:
         assert resp.order_results[1].validation_errors == [{"code": "X"}]
 
     @patch("schwab_advisor.client.httpx.Client")
+    def test_submit_orders_sell_gets_default_tax_lot(self, mock_client_cls):
+        mock = _setup_mock_client(mock_client_cls, {
+            "data": {"id": "u", "type": "submit-order-response",
+                     "attributes": {"totalCount": 1, "successfulCount": 1,
+                                    "fatalErrorCount": 0,
+                                    "informationalCount": 0,
+                                    "orderResults": []}},
+        })
+        client = SchwabAdvisorClient(access_token="test_token")
+        client.submit_orders(equity_order_items=[
+            {"clientOrderIdentifier": "c-1",
+             "transactionType": {"type": "Sell"}},
+            {"clientOrderIdentifier": "c-2",
+             "transactionType": {"type": "Sell",
+                                 "taxLot": {"taxLotMethod": "FIFO"}}},
+            {"clientOrderIdentifier": "c-3",
+             "transactionType": {"type": "Buy"}},
+        ])
+        body = mock.request.call_args.kwargs["json"]
+        items = body["equityOrderItems"]
+        # Bare Sell gets the "use the account default" taxLot injected.
+        assert items[0]["transactionType"]["taxLot"] == {"taxLotMethod": "None"}
+        # An explicit taxLot is left alone.
+        assert items[1]["transactionType"]["taxLot"] == {"taxLotMethod": "FIFO"}
+        # Buys are untouched.
+        assert "taxLot" not in items[2]["transactionType"]
+
+    @patch("schwab_advisor.client.httpx.Client")
     def test_cancel_orders_returns_typed(self, mock_client_cls):
         _setup_mock_client(mock_client_cls, {
             "data": {"id": "uuid-2", "type": "cancel-order-response",

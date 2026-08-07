@@ -2137,6 +2137,27 @@ class SchwabAdvisorClient:
     # AS Trading (segment: trading)
     # =====================================================================
 
+    @staticmethod
+    def _with_default_tax_lot(item: dict) -> dict:
+        """Return the equity order item with a default taxLot on Sells.
+
+        The live service requires transactionType.taxLot on every Sell;
+        taxLotMethod "None" is accepted and defers to the account's default
+        lot method. Items that are not Sells, already carry a taxLot, or
+        have an unexpected shape are returned unchanged.
+        """
+        tx = item.get("transactionType") if isinstance(item, dict) else None
+        if (
+            isinstance(tx, dict)
+            and tx.get("type") == "Sell"
+            and "taxLot" not in tx
+        ):
+            return {
+                **item,
+                "transactionType": {**tx, "taxLot": {"taxLotMethod": "None"}},
+            }
+        return item
+
     def submit_orders(
         self,
         equity_order_items: list[dict] | None = None,
@@ -2154,7 +2175,20 @@ class SchwabAdvisorClient:
         securityIdentifier: {type: "Symbol"|"CUSIP", value: str},
         transactionType: {type: "Buy"|"Sell"|"SellShort"},
         orderType: {type: "Market"|"Limit"|"Stop"|"StopLimit"|"TrailingStop",
-                    market: {duration: "Day"|"GoodTillCancel"|...}}.
+                    market: {duration: "Day"|"GoodTillCancel"|...},
+                    limit: {limitPrice: float, duration: ...}}.
+
+        Sell items REQUIRE a transactionType.taxLot block (the live service
+        rejects sells without one: "Tax information is required when
+        Transaction Type is Sell" — verified sandbox 2026-08-06). If a Sell
+        item has no taxLot, this method injects
+        {"taxLot": {"taxLotMethod": "None"}}, which the service accepts and
+        resolves to the account's default lot method. Pass an explicit
+        taxLot (FIFO, LIFO, HighCost, LowCost, MinimumTax, AverageCost, or
+        SpecificLot + taxLotInfoList) to override.
+
+        Fixed-income securities are NOT tradable on this API (rejected with
+        code "DO"); only equity and mutual-fund order items exist.
 
         Args:
             validate_only: If True (default), validate without submitting.
@@ -2165,7 +2199,9 @@ class SchwabAdvisorClient:
             "shouldOverrideWarnings": should_override_warnings,
         }
         if equity_order_items:
-            body["equityOrderItems"] = equity_order_items
+            body["equityOrderItems"] = [
+                self._with_default_tax_lot(item) for item in equity_order_items
+            ]
         if mutual_fund_order_items:
             body["mutualFundOrderItems"] = mutual_fund_order_items
         response = self._request(
@@ -2183,6 +2219,7 @@ class SchwabAdvisorClient:
 
         Sandbox: VERIFIED - returns validation results. Each order item
         must include cancelReplaceOrderNumber from the original order.
+        Sell items get the same default taxLot injection as submit_orders.
 
         Args:
             validate_only: If True (default), validate without submitting.
@@ -2192,7 +2229,9 @@ class SchwabAdvisorClient:
             "shouldOverrideWarnings": should_override_warnings,
         }
         if equity_order_items:
-            body["equityOrderItems"] = equity_order_items
+            body["equityOrderItems"] = [
+                self._with_default_tax_lot(item) for item in equity_order_items
+            ]
         response = self._request(
             "PUT", "/orders", json_data=body, segment="trading"
         )
