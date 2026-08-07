@@ -50,7 +50,7 @@ from schwab_advisor.models import (
 
 
 def test_version():
-    assert __version__ == "0.4.2"
+    assert __version__ == "0.4.3"
 
 
 def test_client_defaults_to_env_auth():
@@ -2477,6 +2477,41 @@ class TestClientLifecycleRobustness:
         body = mock_inst.request.call_args.kwargs["json"]
         assert body["account"] == 10001857
         assert body["masterAccount"] == 8174295
+
+    @patch("schwab_advisor.client.httpx.Client")
+    def test_order_status_full_filter_fields(self, mock_client_cls):
+        """orderNumbers / contingentIds / symbol / assetType travel in the
+        body with the API's exact key names and integer coercion."""
+        mock_inst = _setup_mock_client(mock_client_cls, {"data": {}})
+        client = SchwabAdvisorClient(access_token="test_token")
+        client.get_order_status(
+            10001857,
+            from_date="2026-07-01",
+            to_date="2026-07-17",
+            master_account=8174295,
+            order_numbers=["898774180000", 998774180000],
+            contingent_ids=[642393829],
+            symbols=["AAPL", "SCHW"],
+            asset_types=["Equity", "MutualFund"],
+        )
+        body = mock_inst.request.call_args.kwargs["json"]
+        assert body["orderNumbers"] == [898774180000, 998774180000]
+        assert body["contingentIds"] == [642393829]
+        assert body["symbol"] == ["AAPL", "SCHW"]
+        assert body["assetType"] == ["Equity", "MutualFund"]
+
+    @patch("schwab_advisor.client.httpx.Client")
+    def test_order_status_filter_fields_omitted_when_unset(
+        self, mock_client_cls
+    ):
+        mock_inst = _setup_mock_client(mock_client_cls, {"data": {}})
+        client = SchwabAdvisorClient(access_token="test_token")
+        client.get_order_status(
+            10001857, from_date="2026-07-01", to_date="2026-07-17"
+        )
+        body = mock_inst.request.call_args.kwargs["json"]
+        for key in ("orderNumbers", "contingentIds", "symbol", "assetType"):
+            assert key not in body
 
 
 class TestProductNotAttached:

@@ -635,10 +635,15 @@ class SchwabAdvisorClient:
     ) -> AddressChangesResponse:
         """Retrieve address changes across all authorized accounts.
 
-        Sandbox: PARTIALLY VERIFIED - returns 200 but always empty data.
-        No address changes exist in sandbox to verify field mapping against
-        real data. Field names are from Schwab's documented example response
-        but have not been seen in a live API response.
+        Sandbox: VERIFIED for the contract (200, all filters and
+        include=customer accepted) but data is always EMPTY: an address
+        change requires client confirmation before it enters the readable
+        pipeline, and no sandbox client ever confirms — so even changes
+        created via create_address_change never appear here. Field names
+        are from Schwab's documented example response but have not been
+        seen in a live API response. The service also has transient
+        multi-minute windows where reads time out (observed 2026-08-06
+        and 2026-08-07); retry on timeout.
         No Schwab-Client-Ids header needed (firm-level endpoint).
         Supports JSON:API relationships and include=customer sideloading.
 
@@ -669,10 +674,13 @@ class SchwabAdvisorClient:
     ) -> AddressChangesResponse:
         """Retrieve a specific address change by action ID.
 
-        Sandbox: NOT VERIFIED - no address change data exists in sandbox
-        to obtain a valid action_id. AddressChangesResponse already
-        normalizes single-object `data` to a one-item `.changes` list,
-        so callers can access `.changes[0]`.
+        Sandbox: route VERIFIED live (2026-08-07) but no action is ever
+        retrievable: ids returned by create_address_change answer 404
+        because the created change waits on client confirmation, which no
+        sandbox client ever gives. Expect 404 in sandbox; retry on the
+        service's transient read-timeout windows. AddressChangesResponse
+        already normalizes single-object `data` to a one-item `.changes`
+        list, so callers can access `.changes[0]`.
         """
         params = {"showAccount": show_account}
         response = self._request(
@@ -690,8 +698,14 @@ class SchwabAdvisorClient:
     ) -> AddressChangeCreateResponse:
         """Submit an address change request.
 
-        Sandbox: NOT VERIFIED - endpoint times out / returns 500 in sandbox.
-        Body schema is from Schwab docs. Should work in production.
+        Sandbox: VERIFIED (2026-08-06/07) - returns 201 in ~1.5s with the
+        new action id and a COA-prefixed envelopeId when the search
+        criteria match exactly one customer. Gotchas: an EMPTY
+        user_entered_addresses list crashes the service (empty-body 500);
+        overly generic names match many fixture customers and have
+        preceded service hang windows — use distinctive names. The created
+        change is NOT retrievable afterwards (client-confirmation gate,
+        see get_address_change).
 
         Args:
             master_account: Master account number (integer).
@@ -2190,6 +2204,12 @@ class SchwabAdvisorClient:
         Fixed-income securities are NOT tradable on this API (rejected with
         code "DO"); only equity and mutual-fund order items exist.
 
+        Mutual-fund Buy items must carry dividendReinvestment and
+        capitalGains inside transactionType.buy (alongside amountType) or
+        the rules engine rejects the item with "'Capital Gains' must not
+        be empty" (verified sandbox 2026-08-07). Note orderNumber comes
+        back as an INT in orderResults.
+
         Args:
             validate_only: If True (default), validate without submitting.
                 Set to False to actually submit orders.
@@ -2264,14 +2284,29 @@ class SchwabAdvisorClient:
         to_date: str,
         master_account: int | str | None = None,
         order_status: str = "All",
+        order_numbers: list[int] | None = None,
+        contingent_ids: list[int] | None = None,
+        symbols: list[str] | None = None,
+        asset_types: list[str] | None = None,
     ) -> OrdersStatusResponse:
         """Get status of trading orders.
 
         Sandbox: VERIFIED - returns order details with status, enter time,
         cusip, quantity, price. Works after submitting an order.
 
+        The ``account`` filter is INERT on the live service (verified
+        2026-08-06/07): responses carry master-wide rows, including other
+        tenants' fixture orders under a shared sandbox master. Filter
+        client-side by account / clientOrderIdentifier and do not rely on
+        ``totalOrders``.
+
         Args:
             order_status: One of All, Open, Filled, Canceled, Expired, Pending.
+            order_numbers: Restrict to these system-generated order numbers.
+            contingent_ids: Restrict to these contingent order ids.
+            symbols: Restrict to these equity / mutual fund symbols.
+            asset_types: Restrict to these asset types, e.g.
+                ["Equity", "MutualFund"].
         """
         body: dict = {
             "account": int(account) if str(account).isdigit() else account,
@@ -2285,6 +2320,14 @@ class SchwabAdvisorClient:
                 if str(master_account).isdigit()
                 else master_account
             )
+        if order_numbers:
+            body["orderNumbers"] = [int(n) for n in order_numbers]
+        if contingent_ids:
+            body["contingentIds"] = [int(c) for c in contingent_ids]
+        if symbols:
+            body["symbol"] = list(symbols)
+        if asset_types:
+            body["assetType"] = list(asset_types)
         response = self._request(
             "POST", "/orders/status", json_data=body, segment="trading"
         )
@@ -2297,7 +2340,12 @@ class SchwabAdvisorClient:
     def upload_blotters(self, base64_file_content: str) -> None:
         """Upload trade blotter file. Returns 204 on success.
 
-        Sandbox: LOW - endpoint accepts requests but needs real trade file.
+        Sandbox: VERIFIED (2026-08-07) - a spec-conformant Web Trading
+        trade order file is accepted with 204. File rules: comma-delimited,
+        NO header row, ALL CAPS, 4-30 fields per row (Simple format is
+        ACCOUNT,ACTION,QUANTITY,SYMBOL), charset limited to alphanumerics
+        plus space / . + * , %. Invalid rows are dropped SILENTLY at Web
+        Trading import time, so validate file conformance before upload.
         Uses trading/v2 segment.
         """
         body = {"base64EncodedFileContent": base64_file_content}
@@ -2312,8 +2360,18 @@ class SchwabAdvisorClient:
     ) -> None:
         """Upload allocation file. Returns 204 on success.
 
-        Sandbox: LOW - endpoint accepts requests but needs real allocation file.
-        Uses trading/v2 segment.
+        Sandbox: VERIFIED (2026-08-07) - accepts ONLY the FIXED-WIDTH
+        allocation format (Web Trading file spec section 4). The equally
+        documented comma-delimited allocation format (section 3) is
+        rejected 400 with the MISLEADING message "The file does not have a
+        valid filename format" - no filename is transmitted on this API;
+        the actual problem is the delimiter style. Fixed-width layout:
+        header ``EH`` + date(8) + master(8, zero-padded) + action(3,
+        left-just) + symbol(21, left-just) + avg price(13, %013.4f) +
+        trade date(8); detail ``EA`` + sub-account + quantity(15,
+        zero-padded); trailer ``ET`` + count(5) + total quantity(15).
+        CRLF line endings, ALL CAPS, no UTF-8 BOM. Allocations are
+        accepted on Trade Day only. Uses trading/v2 segment.
         """
         body = {
             "base64EncodedFileContent": base64_file_content,
