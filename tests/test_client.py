@@ -50,7 +50,7 @@ from schwab_advisor.models import (
 
 
 def test_version():
-    assert __version__ == "0.4.1"
+    assert __version__ == "0.4.2"
 
 
 def test_client_defaults_to_env_auth():
