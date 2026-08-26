@@ -3562,6 +3562,17 @@ class WireTransferResponse:
 
     Bank/recipient/intermediary sub-objects are kept as raw dicts (their
     shapes vary by wire type); the commonly consumed scalars are typed.
+
+    PRODUCTION-VERIFIED 2026-08-25 — the first real 201 this library has
+    ever seen from prod. Two fixes came out of it:
+
+    - ``wire_fee`` is a **string**, not a float. The spec declares
+      ``type: string`` with example ``"Waived"``, and prod returned exactly
+      that. It was previously parsed with ``_safe_float``, which silently
+      turned every real fee into ``0.0`` — "Waived" and "$0.00" were
+      indistinguishable and the actual value was destroyed.
+    - ``recipient_person_or_org_details`` now also reads ``recipientDetails``,
+      the key prod actually returns.
     """
 
     id: str = ""
@@ -3572,8 +3583,9 @@ class WireTransferResponse:
     amount: float = 0.0
     client_id: int | None = None
     process_date: str = ""
-    wire_fee: float = 0.0
+    wire_fee: str = ""
     transmission_note: str = ""
+    is_bsloa_transaction: bool | None = None
     account_details: dict | None = None
     recipient_bank_details: dict | None = None
     recipient_person_or_org_details: dict | None = None
@@ -3600,13 +3612,18 @@ class WireTransferResponse:
             amount=_safe_float(attrs, "amount"),
             client_id=attrs.get("clientId"),
             process_date=attrs.get("processDate", "") or "",
-            wire_fee=_safe_float(attrs, "wireFee"),
+            wire_fee=str(attrs.get("wireFee", "") or ""),
             transmission_note=attrs.get("transmissionNote", "") or "",
+            is_bsloa_transaction=attrs.get("isBSLOATransaction"),
             account_details=attrs.get("accountDetails"),
             recipient_bank_details=attrs.get("recipientBankDetails"),
-            recipient_person_or_org_details=attrs.get(
-                "recipientPersonOrOrgDetails"
-            ),
+            # Live prod returns "recipientDetails"; the spec says
+            # "recipientPersonOrOrgDetails" (proven 2026-08-25 by the first
+            # real 201). Same spec-vs-live naming split as the REQUEST body,
+            # where the spec's recipientPersonOrOrgRequest is rejected and
+            # "recipient" is required. Accept both.
+            recipient_person_or_org_details=attrs.get("recipientDetails")
+            or attrs.get("recipientPersonOrOrgDetails"),
             intermediary_details=attrs.get("intermediaryDetails"),
             second_intermediary_details=attrs.get("secondIntermediaryDetails"),
             third_intermediary_details=attrs.get("thirdIntermediaryDetails"),

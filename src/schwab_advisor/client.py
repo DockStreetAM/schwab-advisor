@@ -2002,6 +2002,26 @@ class SchwabAdvisorClient:
         authorization (wire SLOA ids look like "W-1234567890-2021").
         Returns 201 with the queued wire. Unlike the ACH route, takes no
         clientId and no recurrence fields (wires are one-time).
+
+        PRODUCTION: VERIFIED 2026-08-25 — a real $1.00 wire was booked
+        against a wire SLOA on a firm test account. Schwab enabled
+        /wires in prod the night of 2026-08-24; before that, BOTH wire
+        paths returned 400 "This account is not eligible for a web wire
+        transaction", which was never an entitlement problem — it is what a
+        not-yet-live wire endpoint returned.
+
+        The 201 lands as ``status: "Pending - ... Schwab review"``, not
+        released — a queued wire still passes through Schwab review, so
+        there is a window to stop it in Advisor Center. There is no API
+        cancel either way.
+
+        Two live quirks:
+        - Same-day ``process_date`` after the entry cutoff → 400 "Current
+          dated wire is not allowed after the entry cutoff time." Use the
+          next business day.
+        - A NONEXISTENT standing_authorization_id returns an empty-bodied
+          500, not the clean 404 SEC-0002 the ACH sibling gives. Do not
+          read that 500 as an outage.
         """
         body: dict = {
             "account": int(account) if str(account).isdigit() else account,
@@ -2050,10 +2070,22 @@ class SchwabAdvisorClient:
         demand an ``intermediaryBank`` ("IntermediaryBank details are
         required for transfer via intermediary banks").
 
+        ADDRESS SHAPE — the read and write sides disagree (prod-proven
+        2026-08-25). The validator requires discrete ``city``, ``state``
+        and ``country`` keys (the spec's Address: country, streetNumber,
+        streetName, city, state, zip). It rejects the ``address1`` /
+        ``address2`` / ``address3`` form with "The city field is required"
+        etc. — and that flat form is exactly what the READ side returns in
+        a standing instruction's ``counterParty.address``, so copying a
+        read address straight into a wire request produces a 400.
+
         Args:
             aba_number: 9-digit routing number of the recipient bank.
+                For a deliberately-invalid probe value use "000000001";
+                "000000000" PASSES the ABA checksum.
             recipient_bank: {"account", "accountName", "address": {...}}
-                — address is required by the live validator.
+                — address is required by the live validator, in the
+                city/state/country form described above.
             recipient: same-account-holder shape ({"account",
                 "useModifiedAccountHolderName",
                 "modifiedAccountHolderName"}) or different-holder shape

@@ -59,6 +59,7 @@ from schwab_advisor.models import (  # noqa: E402
     Transaction,
     TransactionsResponse,
     UserAuthorizationsResponse,
+    WireTransferResponse,
     _parse_meta,
 )
 
@@ -2145,6 +2146,66 @@ class TestProdObservedShapes:
     prod does that the OpenAPI specs do not describe — the class exists
     because every one of these was invisible to spec-derived tests.
     """
+
+    def test_wire_transfer_201_prod_shape(self):
+        """The first real prod 201 from POST /wires/standing-authorizations
+        (2026-08-25) exposed two parse bugs. Values below are synthetic;
+        the SHAPE is the one prod returned.
+
+        `wireFee` is the STRING "Waived" — the spec declares type: string —
+        yet the model ran it through `_safe_float`, so every real fee read
+        back as 0.0 and "waived" was indistinguishable from a $0 fee. And
+        prod returns `recipientDetails`, while the spec (and the model)
+        said `recipientPersonOrOrgDetails`, so the recipient was silently
+        None on every live wire. The mocked unit test missed both because
+        its fixture invented `"wireFee": 25.0` — a value the API never
+        returns.
+        """
+        resp = WireTransferResponse.from_dict({
+            "data": {
+                "id": "W-1234567890-2696", "type": "wire-transfer",
+                "attributes": {
+                    "caseId": "MMWI-1234567890123456789",
+                    "status": ("Pending - Review SLOA On File For This "
+                               "Request, Schwab review"),
+                    "amount": 1.0,
+                    "processDate": "2026-08-26",
+                    "wireFee": "Waived",
+                    "isBSLOATransaction": False,
+                    "recipientDetails": {
+                        "formattedAccount": "999999999999999",
+                        "recipientType": "First Party",
+                    },
+                    "recipientBankDetails": {
+                        "bankIdentifiers": [{"type": "ABA",
+                                             "value": "123456789"}],
+                    },
+                },
+            },
+        })
+        assert resp.id == "W-1234567890-2696"
+        assert resp.case_id == "MMWI-1234567890123456789"
+        assert resp.status.startswith("Pending - Review SLOA")
+        assert resp.wire_fee == "Waived"
+        assert resp.is_bsloa_transaction is False
+        assert resp.recipient_person_or_org_details is not None
+        assert (resp.recipient_person_or_org_details["recipientType"]
+                == "First Party")
+
+    def test_wire_transfer_201_spec_recipient_key_still_works(self):
+        """The spec's `recipientPersonOrOrgDetails` must keep parsing —
+        prod uses the other key, but nothing proves every wire type does."""
+        resp = WireTransferResponse.from_dict({
+            "data": {
+                "id": "W-1", "type": "wire-transfer",
+                "attributes": {
+                    "recipientPersonOrOrgDetails": {"name": "SPEC SHAPE"},
+                },
+            },
+        })
+        assert resp.recipient_person_or_org_details == {"name": "SPEC SHAPE"}
+        # Absent wireFee must not become the string "None".
+        assert resp.wire_fee == ""
 
     def test_preferences_response_wrapper_shape(self):
         """Prod (and the spec) return ONE data object with a nested

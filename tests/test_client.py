@@ -50,7 +50,7 @@ from schwab_advisor.models import (
 
 
 def test_version():
-    assert __version__ == "0.4.3"
+    assert __version__ == "0.4.4"
 
 
 def test_client_defaults_to_env_auth():
@@ -1734,7 +1734,9 @@ class TestMoveMoneyTransfers:
                      "attributes": {
                          "caseId": "9912345", "status": "Pending eAuth",
                          "amount": 2500.0, "processDate": "2026-08-15",
-                         "wireFee": 25.0,
+                         # wireFee is a STRING ("Waived") per the spec and
+                         # prod — the old numeric 25.0 here was fabricated.
+                         "wireFee": "Waived",
                          "standingAuthorizationDetails": {"id": "W-1234567890-2021"},
                      }},
         }, status_code=201)
@@ -1747,7 +1749,7 @@ class TestMoveMoneyTransfers:
         assert resp.id == "W-5566778899-2023"
         assert resp.case_id == "9912345"
         assert resp.status == "Pending eAuth"
-        assert resp.wire_fee == 25.0
+        assert resp.wire_fee == "Waived"
         body = mock_inst.request.call_args[1]["json"]
         assert "clientId" not in body  # wire-from-SLOA takes no clientId
         assert body["transmissionNote"] == "Rent payment"
