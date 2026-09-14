@@ -50,7 +50,7 @@ from schwab_advisor.models import (
 
 
 def test_version():
-    assert __version__ == "0.4.4"
+    assert __version__ == "0.5.0"
 
 
 def test_client_defaults_to_env_auth():
@@ -1782,6 +1782,121 @@ class TestMoveMoneyTransfers:
         assert body["intermediaryBank"]["abaNumber"] == "026009593"
         url = mock_inst.request.call_args[0][1]
         assert url.endswith("/transfers/v1/wires")
+
+    @patch("schwab_advisor.client.httpx.Client")
+    def test_wire_from_authorization_tax_remittance(self, mock_client_cls):
+        """Federal tax payment wire, prod-verified 2026-09-14 against a
+        'Fed Tax' wire SLOA. Every taxRemittance value must cross the wire
+        as a STRING — an int taxYear 400s with "The JSON value could not be
+        converted to System.String. Path: $.taxRemittance.taxYear" — so an
+        int passed in here must come out quoted."""
+        mock_inst = _setup_mock_client(mock_client_cls, {
+            "data": {"id": "W-1000000001-0001", "type": "wire-transfer",
+                     "attributes": {
+                         "caseId": "MMWI-1000000000000000001",
+                         "status": "Pending - Review SLOA On File For This "
+                                   "Request, Schwab review",
+                         "amount": 99.0, "processDate": "2026-09-14",
+                         "wireFee": "Waived",
+                         "taxRemittanceDetails": {
+                             "taxTypeCode": "10406", "taxYear": "2026",
+                             "taxMonthCode": "12",
+                             "formattedTaxPayerId": "XXXXX6789"},
+                     }},
+        }, status_code=201)
+        client = SchwabAdvisorClient(access_token="test_token")
+        resp = client.create_wire_transfer_from_authorization(
+            "W-1000000002-0001",
+            account="10001857", amount=99.0, process_date="2026-09-14",
+            tax_remittance={"taxpayerId": "123456789",
+                            "taxTypeCode": "10406",
+                            "taxYear": 2026,      # int in ...
+                            "taxMonthCode": 12},  # ... str out
+        )
+        body = mock_inst.request.call_args[1]["json"]
+        assert body["taxRemittance"] == {
+            "taxpayerId": "123456789", "taxTypeCode": "10406",
+            "taxYear": "2026", "taxMonthCode": "12",
+        }
+        assert all(isinstance(v, str) for v in body["taxRemittance"].values())
+        # The response echoes the taxpayer id MASKED — the safe form to log.
+        assert resp.tax_remittance_details["formattedTaxPayerId"] == "XXXXX6789"
+        assert resp.tax_remittance_details["taxYear"] == "2026"
+        assert resp.wire_fee == "Waived"
+
+    @pytest.mark.parametrize("month_in,month_out", [
+        (3, "03"), ("3", "03"), ("03", "03"), (12, "12"), ("12", "12"),
+    ])
+    @patch("schwab_advisor.client.httpx.Client")
+    def test_tax_remittance_month_zero_padded(
+        self, mock_client_cls, month_in, month_out
+    ):
+        """taxMonthCode is the MM half of the FTCS beneficiary line
+        (TIN:NameControl:Name:TaxType:YY:MM:), and only the two-character
+        form has been seen accepted in production. A single-digit month --
+        int or str -- is padded rather than sent bare."""
+        mock_inst = _setup_mock_client(mock_client_cls, {
+            "data": {"id": "W-1", "type": "wire-transfer",
+                     "attributes": {"status": "Pending", "amount": 99.0}},
+        }, status_code=201)
+        client = SchwabAdvisorClient(access_token="test_token")
+        client.create_wire_transfer_from_authorization(
+            "W-1000000002-0001",
+            account="10001857", amount=99.0, process_date="2026-09-14",
+            tax_remittance={"taxpayerId": "123456789",
+                            "taxTypeCode": "10406",
+                            "taxYear": "2026",
+                            "taxMonthCode": month_in},
+        )
+        body = mock_inst.request.call_args[1]["json"]
+        assert body["taxRemittance"]["taxMonthCode"] == month_out
+
+    @pytest.mark.parametrize("partial", [
+        {"taxTypeCode": "10406", "taxYear": "2026", "taxMonthCode": "12"},
+        {"taxpayerId": "123456789", "taxYear": "2026", "taxMonthCode": "12"},
+        {"taxpayerId": "123456789", "taxTypeCode": "10406", "taxMonthCode": "12"},
+        {"taxpayerId": "123456789", "taxTypeCode": "10406", "taxYear": "2026"},
+    ])
+    @patch("schwab_advisor.client.httpx.Client")
+    def test_tax_remittance_partial_block_refused(self, mock_client_cls, partial):
+        """Schwab reports these as "The TaxYear field is required.
+        @TaxRemittance.TaxYear" etc. Refuse client-side instead of booking a
+        round-trip to find out."""
+        _setup_mock_client(mock_client_cls, {"data": {}}, status_code=201)
+        client = SchwabAdvisorClient(access_token="test_token")
+        with pytest.raises(ValueError, match="tax_remittance is missing"):
+            client.create_wire_transfer_from_authorization(
+                "W-1000000002-0001", account="10001857", amount=99.0,
+                process_date="2026-09-14", tax_remittance=partial,
+            )
+
+    @patch("schwab_advisor.client.httpx.Client")
+    def test_freeform_wire_direct_bank_shape(self, mock_client_cls):
+        """A DIRECT wire sends recipientBank={"abaNumber": ...} only.
+        Schwab: "RecipientBank must have either 'abaNumber' (for direct
+        transfers) or 'account', 'accountName', and 'address' (for
+        intermediary transfers)." The library must pass the direct shape
+        through untouched and add no intermediaryBank of its own."""
+        mock_inst = _setup_mock_client(mock_client_cls, {
+            "data": {"id": "W-1", "type": "wire-transfer",
+                     "attributes": {"status": "Pending", "amount": 99.0}},
+        }, status_code=201)
+        client = SchwabAdvisorClient(access_token="test_token")
+        client.create_wire_transfer(
+            account="10001857", client_id=123456789, amount=99.0,
+            process_date="2026-09-14", aba_number="091036164",
+            recipient_bank={"abaNumber": "091036164"},
+            recipient={"account": "123456789", "accountName": "JOHN SMITH",
+                       "address": {"streetNumber": "1", "streetName": "Main St",
+                                   "city": "BOS", "state": "MA",
+                                   "zip": "02101", "country": "US"}},
+            tax_remittance={"taxpayerId": "123456789", "taxTypeCode": "10406",
+                            "taxYear": "2026", "taxMonthCode": "12"},
+        )
+        body = mock_inst.request.call_args[1]["json"]
+        assert body["recipientBank"] == {"abaNumber": "091036164"}
+        assert "intermediaryBank" not in body
+        assert body["taxRemittance"]["taxTypeCode"] == "10406"
 
 
 class TestTypedRawDictMethodsTail:

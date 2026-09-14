@@ -118,6 +118,41 @@ def product_not_attached(exc: httpx.HTTPStatusError) -> bool:
     )
 
 
+TAX_REMITTANCE_KEYS = ("taxpayerId", "taxTypeCode", "taxYear", "taxMonthCode")
+
+
+def _tax_remittance_body(tax_remittance: dict) -> dict:
+    """Normalize the federal-tax-payment block for POST /wires and
+    POST /wires/standing-authorizations/{id} (prod-verified 2026-09-14).
+
+    Every value crosses the wire as a STRING: an int ``taxYear`` 400s with
+    "The JSON value could not be converted to System.String. Path:
+    $.taxRemittance.taxYear". Coercing here means a caller passing
+    ``taxYear=2026`` gets a booked wire instead of a deserializer error.
+
+    ``taxMonthCode`` is zero-padded to the two-digit MM the FTCS
+    beneficiary line carries, so an int ``3`` becomes ``"03"`` rather than
+    a bare ``"3"``. Only the documented two-character form has been seen
+    accepted in production.
+
+    All four keys are required — Schwab reports the missing ones as "The
+    TaxYear field is required. @TaxRemittance.TaxYear" — so a partial block
+    is refused here rather than round-tripped to be rejected.
+    """
+    missing = [k for k in TAX_REMITTANCE_KEYS if not tax_remittance.get(k)]
+    if missing:
+        raise ValueError(
+            f"tax_remittance is missing {missing}; all of "
+            f"{list(TAX_REMITTANCE_KEYS)} are required for a federal tax "
+            "payment wire"
+        )
+    body = {k: str(tax_remittance[k]) for k in TAX_REMITTANCE_KEYS}
+    month = body["taxMonthCode"]
+    if len(month) == 1 and month.isdigit():
+        body["taxMonthCode"] = month.zfill(2)
+    return body
+
+
 class SchwabAdvisorClient:
     """Client for interacting with Schwab Advisor Services API."""
 
@@ -1995,6 +2030,7 @@ class SchwabAdvisorClient:
         transmission_note: str | None = None,
         ptrs_details: dict | None = None,
         retirement_details: dict | None = None,
+        tax_remittance: dict | None = None,
         show_account: MaskMode = "Mask",
         correl_id: str | None = None,
     ) -> WireTransferResponse:
@@ -2022,6 +2058,35 @@ class SchwabAdvisorClient:
         - A NONEXISTENT standing_authorization_id returns an empty-bodied
           500, not the clean 404 SEC-0002 the ACH sibling gives. Do not
           read that 500 as an outage.
+
+        FEDERAL TAX PAYMENT WIRES (``tax_remittance``) — VERIFIED IN
+        PRODUCTION 2026-09-14, and absent from Schwab's published spec.
+        A wire to the Treasury (ABA 091036164, "US TREAS SINGLE TX") is
+        classified by Schwab as a tax payment wire and needs a
+        ``taxRemittance`` block carrying the four values the Advisor
+        Center's "Tax payment details" panel collects::
+
+            tax_remittance={
+                "taxpayerId": "123456789",   # 9 digits, no dashes
+                "taxTypeCode": "10406",      # 1040 + suffix 6 = estimated
+                "taxYear": "2026",
+                "taxMonthCode": "12",        # 1040 family: fiscal year-end
+            }
+
+        All four are REQUIRED and all four are STRINGS — an int
+        ``taxYear`` 400s with "The JSON value could not be converted to
+        System.String". Omitting the block on a tax SLOA 400s with "The
+        taxId attribute is invalid or was not provided."
+
+        Schwab formats the FTCS Fedwire beneficiary line
+        (``TIN:NameControl:Name:TaxType:YY:MM:``) itself; do NOT compose
+        it by hand into any account field.
+
+        The tax SLOA stores only the Treasury ABA and the taxpayer's
+        name — NO tax block — so the period rides on every request and
+        **one standing authorization serves every tax year**. The 201
+        echoes ``taxRemittanceDetails`` with a masked
+        ``formattedTaxPayerId``, and ``wireFee`` comes back "Waived".
         """
         body: dict = {
             "account": int(account) if str(account).isdigit() else account,
@@ -2035,6 +2100,8 @@ class SchwabAdvisorClient:
             body["ptrsRequestDetails"] = ptrs_details
         if retirement_details:
             body["retirementRequestDetails"] = retirement_details
+        if tax_remittance:
+            body["taxRemittance"] = _tax_remittance_body(tax_remittance)
         response = self._request(
             "POST",
             f"/wires/standing-authorizations/{standing_authorization_id}",
@@ -2055,6 +2122,7 @@ class SchwabAdvisorClient:
         transmission_note: str | None = None,
         ptrs_details: dict | None = None,
         retirement_details: dict | None = None,
+        tax_remittance: dict | None = None,
         show_account: MaskMode = "Mask",
         correl_id: str | None = None,
     ) -> WireTransferResponse:
@@ -2066,9 +2134,22 @@ class SchwabAdvisorClient:
         requires ``recipient`` and ``recipientBank`` (the spec says
         recipientPersonOrOrgRequest / recipientBankRequest, which the
         validator rejects with "The Recipient field is required").
-        Addresses are required on both objects, and the validator can
-        demand an ``intermediaryBank`` ("IntermediaryBank details are
-        required for transfer via intermediary banks").
+
+        ``recipientBank`` HAS TWO SHAPES, and sending the wrong one is
+        the cause of the misleading "IntermediaryBank details are
+        required for transfer via intermediary banks" 400 (live-probed
+        2026-09-11). Schwab's own validator states the rule::
+
+            RecipientBank must have either 'abaNumber' (for direct
+            transfers) or 'account', 'accountName', and 'address'
+            (for intermediary transfers).
+
+        So a DIRECT wire sends ``{"abaNumber": "..."}`` and nothing
+        else; only the account/name/address form implies an
+        intermediary, and that form then genuinely requires
+        ``intermediary_bank.abaNumber``. Composing the intermediary
+        shape for an ordinary direct wire — as this docstring previously
+        told callers to — makes every direct wire fail.
 
         ADDRESS SHAPE — the read and write sides disagree (prod-proven
         2026-08-25). The validator requires discrete ``city``, ``state``
@@ -2083,15 +2164,34 @@ class SchwabAdvisorClient:
             aba_number: 9-digit routing number of the recipient bank.
                 For a deliberately-invalid probe value use "000000001";
                 "000000000" PASSES the ABA checksum.
-            recipient_bank: {"account", "accountName", "address": {...}}
-                — address is required by the live validator, in the
+            recipient_bank: EITHER {"abaNumber": "..."} for a direct
+                wire, OR {"account", "accountName", "address": {...}}
+                for a wire via an intermediary — see the two-shape note
+                above. The address, when used, must be in the
                 city/state/country form described above.
             recipient: same-account-holder shape ({"account",
                 "useModifiedAccountHolderName",
                 "modifiedAccountHolderName"}) or different-holder shape
                 ({"account", "accountName", "address": {...}}).
-            intermediary_bank: e.g. {"abaNumber": "..."} when the route
-                requires an intermediary.
+            intermediary_bank: e.g. {"abaNumber": "..."} — required when
+                recipient_bank uses the account/name/address shape.
+            tax_remittance: federal tax payment block, {"taxpayerId",
+                "taxTypeCode", "taxYear", "taxMonthCode"} — see
+                ``create_wire_transfer_from_authorization`` for the full
+                contract. Schwab classifies a wire to the Treasury
+                (ABA 091036164) as a tax payment wire, which brings two
+                extra rules on THIS route: ``intermediary_bank`` is
+                refused outright ("Intermediary agents are not supported
+                for tax payment wires") and the first-party recipient
+                shape is refused ("TaxRemittance is only allowed for
+                RecipientDifferentAccountHolderRequest") — a tax wire is
+                third-party by construction. Note that a third-party wire
+                with no standing authorization still ends at 400 "Unable
+                to accept Wire request as Client Authorization Required":
+                the API cannot request the client's eAuthorization, so
+                tax wires in practice go through
+                ``create_wire_transfer_from_authorization`` against a
+                tax wire SLOA.
         """
         body: dict = {
             "account": int(account) if str(account).isdigit() else account,
@@ -2111,6 +2211,8 @@ class SchwabAdvisorClient:
             body["ptrsRequestDetails"] = ptrs_details
         if retirement_details:
             body["retirementRequestDetails"] = retirement_details
+        if tax_remittance:
+            body["taxRemittance"] = _tax_remittance_body(tax_remittance)
         response = self._request(
             "POST", "/wires",
             json_data=body, segment="transfers", correl_id=correl_id,
