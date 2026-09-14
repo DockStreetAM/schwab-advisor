@@ -3593,6 +3593,12 @@ class WireTransferResponse:
     second_intermediary_details: dict | None = None
     third_intermediary_details: dict | None = None
     standing_authorization_details: dict | None = None
+    # Federal tax payment wires (prod-verified 2026-09-14): the 201 echoes
+    # {"taxTypeCode", "taxYear", "taxMonthCode", "formattedTaxPayerId"} —
+    # the taxpayer id comes back MASKED (five X's then the last four
+    # digits), so this is the safe thing to show on an approval card
+    # or in a log.
+    tax_remittance_details: dict | None = None
     retirement_details: RetirementDetails | None = None
     ptrs_details: dict | None = None
     warnings: list[TransferWarning] = field(default_factory=list)
@@ -3630,6 +3636,7 @@ class WireTransferResponse:
             standing_authorization_details=attrs.get(
                 "standingAuthorizationDetails"
             ),
+            tax_remittance_details=attrs.get("taxRemittanceDetails"),
             retirement_details=RetirementDetails.from_dict(ret) if ret else None,
             ptrs_details=attrs.get("ptrsResponseDetails"),
             warnings=_parse_transfer_warnings(data),
